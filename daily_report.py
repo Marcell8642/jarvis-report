@@ -31,7 +31,7 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
                     "Chrome/131.0 Safari/537.36", "Cookie": "SOCS=CAI; CONSENT=YES+cb", "Accept-Language": "en"}
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+CHAT_ID = re.sub(r"[^0-9-]", "", os.environ.get("TELEGRAM_CHAT_ID", ""))   # drop quotes/spaces/text
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 CHANNEL = os.environ.get("YT_CHANNEL", "").strip()
 SEND_NOW = os.environ.get("SEND_NOW", "").lower() == "true"
@@ -213,9 +213,38 @@ def tg(method, **kw):
     return r.json()
 
 
+def find_chat():
+    """Check the chat ID before the slow part; if Telegram doesn't know it, find the right one."""
+    global CHAT_ID
+    me = requests.get(f"https://api.telegram.org/bot{TOKEN}/getMe", timeout=30).json()
+    if not me.get("ok"):
+        sys.exit(f"The TELEGRAM_TOKEN secret is wrong or revoked: {me}")
+    bot = "@" + me["result"]["username"]
+    print("Bot:", bot)
+    if CHAT_ID:
+        r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getChat", params={"chat_id": CHAT_ID}, timeout=30).json()
+        if r.get("ok"):
+            return
+        print(f"TELEGRAM_CHAT_ID ({CHAT_ID}) is not a chat of {bot}: {r.get('description')}")
+    ups = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates", timeout=30).json().get("result", [])
+    chats = {}
+    for u in ups:
+        m = u.get("message") or u.get("edited_message") or {}
+        c = m.get("chat") or {}
+        if c.get("type") == "private":
+            chats[str(c["id"])] = c.get("first_name", "")
+    if len(chats) == 1:
+        CHAT_ID = next(iter(chats))
+        print(f"Using the chat found in recent messages: {CHAT_ID}  <- put this into the TELEGRAM_CHAT_ID secret")
+        return
+    sys.exit(f"Can't find your chat. Open Telegram, write 'hi' to {bot} (press Start first), then run again. "
+             f"Chats seen: {chats or 'none'}")
+
+
 def main():
-    if not TOKEN or not CHAT_ID:
-        sys.exit("TELEGRAM_TOKEN or TELEGRAM_CHAT_ID secret is missing (see the guide).")
+    if not TOKEN:
+        sys.exit("TELEGRAM_TOKEN secret is missing (see the guide).")
+    find_chat()
     state = load_state()
     if not wait_for_send_time(state):
         return
@@ -227,6 +256,9 @@ def main():
     print(fact_text)
 
     script = voice_script(fact_text, vids, prev)
+    script = re.sub(r"[^\w\s.,!?;:'\"()%&+/-]", "", script)      # emoji can't be spoken
+    script = re.sub(r"\s+([.,!?])", r"\1", re.sub(r"\.+", ".", script))
+    script = re.sub(r"([.!?]),", r"\1", script).strip()
     print("Voice script:", script)
     ogg, secs = make_voice(script)
     with open(ogg, "rb") as f:
